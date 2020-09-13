@@ -14,7 +14,7 @@ import logging
 
 
 class WebGraph():
-
+    #set max_nnz to 100 for faster testing
     def __init__(self, filename, max_nnz=None, filter_ratio=None):
         '''
         Initializes the WebGraph from a file.
@@ -104,8 +104,11 @@ class WebGraph():
 
         else:
             v = torch.zeros(n)
-            # FIXME: your code goes here
-        
+            for i in range(0,n):
+                url = self._index_to_url(i)
+                if url_satisfies_query(url,query):
+                    v[i] = 1
+
         v_sum = torch.sum(v)
         assert(v_sum>0)
         v /= v_sum
@@ -116,9 +119,8 @@ class WebGraph():
     def power_method(self, v=None, x0=None, alpha=0.85, max_iterations=1000, epsilon=1e-6):
         '''
         This function implements the power method for computing the pagerank.
-
+        Computes the $a$ vector and implements Equation 5.1 from "Deeper Inside Pagerank."
         The self.P variable stores the $P$ matrix.
-        You will have to compute the $a$ vector and implement Equation 5.1 from "Deeper Inside Pagerank."
         '''
         with torch.no_grad():
             n = self.P.shape[0]
@@ -135,10 +137,31 @@ class WebGraph():
             x0 /= torch.norm(x0)
 
             # main loop
-            # FIXME: your code goes here
-            x = x0.squeeze()
+            # The following code loops through the following equation for the power method
+            # alpha * x^(k-1)^T*self.P + (alpha*x^(k-1)^T * a + (1-alpha) *v.t()
+            x = x0
+            row_sums = torch.sparse.sum(self.P,1)
 
-            return x
+            #initializes "a" vector
+            a = torch.zeros(n) 
+            for i in range(n):
+                if row_sums[i] == 0:
+                    a[i] = 1
+
+            for k in range(0, max_iterations):
+                x_prev = x
+                alpha_x = alpha * x_prev.t()
+                leftEquation = torch.sparse.mm(self.P.t(), alpha_x.t()).t() # transpose to have torch.sparse.mm work efficiently
+                rightEquation = alpha_x * a + (1-alpha)
+                rightEquation = rightEquation * v.t()
+                x = (leftEquation + rightEquation).t()
+
+                if torch.norm(x - x_prev) < epsilon:
+                    break
+
+            return x.squeeze()
+
+
 
 
     def search(self, pi, query='', max_results=10):
