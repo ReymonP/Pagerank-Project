@@ -9,19 +9,14 @@ import math
 import torch
 import gzip
 import csv
-
+import gensim.downloader
 import logging
 
+vectors = gensim.downloader.load('glove-twitter-25')
 
 class WebGraph():
-    #set max_nnz to 100 for faster testing
+
     def __init__(self, filename, max_nnz=None, filter_ratio=None):
-        '''
-        Initializes the WebGraph from a file.
-        The file should be a gzipped csv file.
-        Each line contains two entries: the source and target corresponding to a single web link.
-        This code assumes that the file is sorted on the source column.
-        '''
 
         self.url_dict = {}
         indices = []
@@ -52,7 +47,7 @@ class WebGraph():
                     new_indices.append([source,target])
             indices = new_indices
 
-        # compute the values that correspond to the indices variable
+        # compute the values
         logging.debug('computing values')
         values = []
         last_source = indices[0][0]
@@ -75,28 +70,16 @@ class WebGraph():
     
 
     def _url_to_index(self, url):
-        '''
-        given a url, returns the row/col index into the self.P matrix
-        '''
         if url not in self.url_dict:
             self.url_dict[url] = len(self.url_dict)
         return self.url_dict[url]
 
 
     def _index_to_url(self, index):
-        '''
-        given a row/col index into the self.P matrix, returns the corresponding url
-        '''
         return self.index_dict[index]
 
 
     def make_personalization_vector(self, query=None):
-        '''
-        If query is None, returns the vector of 1s.
-        If query contains a string,
-        then each url satisfying the query has the vector entry set to 1;
-        all other entries are set to 0.
-        '''
         n = self.P.shape[0]
 
         if query is None:
@@ -104,11 +87,10 @@ class WebGraph():
 
         else:
             v = torch.zeros(n)
-            for i in range(0,n):
-                url = self._index_to_url(i)
-                if url_satisfies_query(url,query):
+            for url,i in self.url_dict.items():
+                if url_satisfies_query(url, query):
                     v[i] = 1
-
+        
         v_sum = torch.sum(v)
         assert(v_sum>0)
         v /= v_sum
@@ -117,13 +99,13 @@ class WebGraph():
 
 
     def power_method(self, v=None, x0=None, alpha=0.85, max_iterations=1000, epsilon=1e-6):
-        '''
-        This function implements the power method for computing the pagerank.
-        Computes the $a$ vector and implements Equation 5.1 from "Deeper Inside Pagerank."
-        The self.P variable stores the $P$ matrix.
-        '''
         with torch.no_grad():
             n = self.P.shape[0]
+
+            # 
+            nondangling_nodes = torch.sparse.sum(self.P,1).indices()
+            a = torch.ones([n,1])
+            a[nondangling_nodes] = 0
 
             # create variables if none given
             if v is None:
@@ -137,39 +119,30 @@ class WebGraph():
             x0 /= torch.norm(x0)
 
             # main loop
-            # The following code loops through the following equation for the power method
-            # alpha * x^(k-1)^T*self.P + (alpha*x^(k-1)^T * a + (1-alpha) *v.t()
-            x = x0
-            row_sums = torch.sparse.sum(self.P,1)
-
-            #initializes "a" vector
-            a = torch.zeros(n) 
-            for i in range(n):
-                if row_sums[i] == 0:
-                    a[i] = 1
-
-            for k in range(0, max_iterations):
-                x_prev = x
-                alpha_x = alpha * x_prev.t()
-                leftEquation = torch.sparse.mm(self.P.t(), alpha_x.t()).t() # transpose to have torch.sparse.mm work efficiently
-                rightEquation = alpha_x * a + (1-alpha)
-                rightEquation = rightEquation * v.t()
-                x = (leftEquation + rightEquation).t()
-
-                if torch.norm(x - x_prev) < epsilon:
+            xprev = x0
+            x = xprev.detach().clone()
+            for i in range(max_iterations):
+                xprev = x.detach().clone()
+                q = (alpha*x.t()@a + (1-alpha)) * v.t()
+                x = torch.sparse.addmm(
+                        q.t(),
+                        self.P.t(),
+                        x,
+                        beta=1,
+                        alpha=alpha
+                        )
+                x /= torch.norm(x)
+                accuracy = torch.norm(x-xprev)
+                logging.debug('i='+str(i)+' accuracy='+str(accuracy))
+                if accuracy < epsilon:
                     break
 
             return x.squeeze()
 
 
-
-
     def search(self, pi, query='', max_results=10):
-        '''
-        Logs all urls that match the query.
-        Results are displayed in sorted order according to the pagerank vector pi.
-        '''
         n = self.P.shape[0]
+        k = min(max_results,n)
         vals,indices = torch.topk(pi,n)
 
         matches = 0
@@ -180,7 +153,7 @@ class WebGraph():
             url = self._index_to_url(index)
             pagerank = vals[i].item()
             if url_satisfies_query(url,query):
-                logging.info(f'rank={matches} pagerank={pagerank:0.4e} url={url}')
+                logging.info('rank='+str(matches)+' pagerank='+str(pagerank)+' url='+url)
                 matches += 1
 
 
@@ -211,6 +184,14 @@ def url_satisfies_query(url, query):
     '''
     satisfies = False
     terms = query.split()
+    limit_similar_words = 5
+    
+    list = []
+    for term in terms:
+        similar = vectors.most_similar(term)
+        for i in range(limit_similar_words):
+            list.append(similar[i][0])
+    terms.extend(list)
 
     num_terms=0
     for term in terms:
@@ -232,7 +213,7 @@ if __name__=='__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', required=True)
-    parser.add_argument('--personalization_vector_query')
+    parser.add_argument('--personalization_vector_query', default='')
     parser.add_argument('--search_query', default='')
     parser.add_argument('--filter_ratio', type=float, default=None)
     parser.add_argument('--alpha', type=float, default=0.85)
